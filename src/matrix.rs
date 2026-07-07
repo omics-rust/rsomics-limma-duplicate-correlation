@@ -10,10 +10,21 @@ fn open(path: &Path) -> Result<BufReader<File>> {
     Ok(BufReader::new(f))
 }
 
+/// Parse a numeric cell, rejecting non-finite values loudly. Rust's f64 parser
+/// accepts `inf`/`nan` literals; limma drops such observations, but a silently
+/// accepted NaN would poison the per-gene REML objective at every rho and leak a
+/// garbage correlation into the consensus, so we fail fast instead.
 fn parse_f64(s: &str) -> Result<f64> {
     let t = s.trim();
-    t.parse::<f64>()
-        .map_err(|_| RsomicsError::InvalidInput(format!("non-numeric value '{t}'")))
+    let v = t
+        .parse::<f64>()
+        .map_err(|_| RsomicsError::InvalidInput(format!("non-numeric value '{t}'")))?;
+    if !v.is_finite() {
+        return Err(RsomicsError::InvalidInput(format!(
+            "non-finite value '{t}'"
+        )));
+    }
+    Ok(v)
 }
 
 pub struct Expr {

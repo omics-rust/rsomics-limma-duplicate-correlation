@@ -1,6 +1,6 @@
 [package]
 name = "rsomics-limma-duplicate-correlation"
-version = "0.1.0"
+version = "0.1.1"
 description = "REML consensus intra-block (duplicate-spot / technical-replicate) correlation for a log-expression matrix + design + block factor — a clean-room Rust reimplementation of limma's duplicateCorrelation"
 edition = "2024"
 rust-version = "1.91"

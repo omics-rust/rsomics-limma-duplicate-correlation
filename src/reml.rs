@@ -8,12 +8,20 @@
 
 use crate::block::{Design, GeneStats};
 
-/// Negative REML profile log-likelihood at a single rho, up to a constant.
+/// Profiled REML terms at a single rho: the residual sum of squares, residual
+/// df, and the two log-determinants entering the objective.
 ///
 /// With a = 1/(1-rho) and g = rho/(1+(m-1)rho), the compound-symmetry inverse
 /// is Vinv = a(I - g J), so each block contraction is dot products plus a
 /// rank-one correction from the within-block X and y sums.
-fn neg_reml(rho: f64, d: &Design, g: &GeneStats) -> f64 {
+struct RemlTerms {
+    rss: f64,
+    df: f64,
+    logdet_v: f64,
+    logdet_xtvix: f64,
+}
+
+fn reml_terms(rho: f64, d: &Design, g: &GeneStats) -> RemlTerms {
     let p = d.p;
     let mut xtvix = vec![0.0f64; p * p];
     let mut xtviy = vec![0.0f64; p];
@@ -43,9 +51,19 @@ fn neg_reml(rho: f64, d: &Design, g: &GeneStats) -> f64 {
     for j in 0..p {
         rss -= xtviy[j] * beta[j];
     }
-    let df = (d.n - p) as f64;
-    let s2 = rss / df;
-    0.5 * (df * s2.ln() + logdet_v + logdet_xtvix)
+    RemlTerms {
+        rss,
+        df: (d.n - p) as f64,
+        logdet_v,
+        logdet_xtvix,
+    }
+}
+
+/// Negative REML profile log-likelihood at a single rho, up to a constant.
+fn neg_reml(rho: f64, d: &Design, g: &GeneStats) -> f64 {
+    let t = reml_terms(rho, d, g);
+    let s2 = t.rss / t.df;
+    0.5 * (t.df * s2.ln() + t.logdet_v + t.logdet_xtvix)
 }
 
 /// Lower-triangular Cholesky of a row-major p×p SPD matrix, returning the
@@ -91,10 +109,24 @@ fn chol_solve(l: &[f64], rhs: &[f64], p: usize) -> Vec<f64> {
     x
 }
 
-/// REML estimate of rho for one gene, or None if the fit is degenerate.
+/// REML estimate of rho for one gene, or None if the gene is non-estimable.
+///
+/// A residual sum of squares that has collapsed to zero (a constant / all-zero
+/// gene the design fits exactly) drives the profile objective to -inf at every
+/// rho, and Brent then drifts to a boundary and reports a spurious extreme
+/// correlation. limma's mixedModel2Fit reports such genes as NA; we mirror that
+/// by returning None, which excludes the gene from the trimmed-mean consensus.
 pub fn gene_rho(d: &Design, g: &GeneStats, lower: f64, upper: f64) -> Option<f64> {
     let rho = brent_min(lower, upper, |r| neg_reml(r, d, g));
-    if rho.is_finite() { Some(rho) } else { None }
+    if !rho.is_finite() {
+        return None;
+    }
+    let t = reml_terms(rho, d, g);
+    let obj = 0.5 * (t.df * (t.rss / t.df).ln() + t.logdet_v + t.logdet_xtvix);
+    if t.rss <= 0.0 || !obj.is_finite() {
+        return None;
+    }
+    Some(rho)
 }
 
 /// Brent's combined golden-section / parabolic-interpolation minimiser.

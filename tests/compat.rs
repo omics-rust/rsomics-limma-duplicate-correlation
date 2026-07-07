@@ -89,13 +89,17 @@ fn assert_close(a: &Parsed, b: &Parsed, label: &str) {
     eprintln!("{label}: consensus rel={crel:e}, max per-gene rel={max_rel:e}");
 }
 
-fn run_ours() -> String {
-    let out = Command::new(ours())
-        .arg(golden("expr.tsv"))
-        .args(["--design", golden("design.tsv").to_str().unwrap()])
-        .args(["--block", golden("blocks.tsv").to_str().unwrap()])
+fn run_ours_on(expr: &str, design: &str, block: &str) -> std::process::Output {
+    Command::new(ours())
+        .arg(golden(expr))
+        .args(["--design", golden(design).to_str().unwrap()])
+        .args(["--block", golden(block).to_str().unwrap()])
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+fn run_ours() -> String {
+    let out = run_ours_on("expr.tsv", "design.tsv", "blocks.tsv");
     assert!(
         out.status.success(),
         "ours failed: {}",
@@ -112,6 +116,82 @@ fn golden_consensus() {
         &parse(&ours_out),
         &parse(&expected),
         "duplicateCorrelation (golden)",
+    );
+}
+
+/// A non-estimable gene (here an exactly all-zero row, which the design fits
+/// with residual sum of squares 0) must be reported NA and dropped from the
+/// consensus, matching limma's mixedModel2Fit. Without the guard the profile
+/// REML objective is -inf at every rho, Brent drifts to the upper clamp, and the
+/// gene leaks a spurious rho=0.99 into the trimmed-mean consensus. Expected
+/// values captured from limma 3.62.1 duplicateCorrelation.
+#[test]
+fn golden_degenerate_gene_is_na() {
+    let out = run_ours_on(
+        "degenerate_expr.tsv",
+        "degenerate_design.tsv",
+        "degenerate_blocks.tsv",
+    );
+    assert!(
+        out.status.success(),
+        "ours failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ours = parse(&String::from_utf8(out.stdout).unwrap());
+    assert_eq!(
+        ours.atanh.get("g_zero"),
+        Some(&None),
+        "all-zero gene must be NA (excluded), got {:?}",
+        ours.atanh.get("g_zero")
+    );
+    let expected = std::fs::read_to_string(golden("degenerate_result.expected.tsv")).unwrap();
+    assert_close(
+        &ours,
+        &parse(&expected),
+        "duplicateCorrelation (degenerate)",
+    );
+}
+
+/// Non-finite input cells (`inf`/`nan`, which Rust's f64 parser silently
+/// accepts) must be rejected loudly rather than poisoning the REML objective.
+#[test]
+fn nonfinite_cell_is_rejected() {
+    let dir = std::env::temp_dir().join(format!("dupcor_inf_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let expr = dir.join("expr.tsv");
+    std::fs::write(
+        &expr,
+        "gene\ts001\ts002\ts003\ts004\ts005\ts006\n\
+         g1\t1\t2\tinf\t4\t5\t6\n\
+         g2\t2\t1\t3\t2\t4\t3\n",
+    )
+    .unwrap();
+    let design = dir.join("design.tsv");
+    std::fs::write(
+        &design,
+        "sample\tIntercept\tGroup\n\
+         s001\t1\t0\ns002\t1\t1\ns003\t1\t0\ns004\t1\t1\ns005\t1\t0\ns006\t1\t1\n",
+    )
+    .unwrap();
+    let block = dir.join("blocks.tsv");
+    std::fs::write(
+        &block,
+        "sample\tblock\n\
+         s001\tb1\ns002\tb1\ns003\tb1\ns004\tb2\ns005\tb2\ns006\tb2\n",
+    )
+    .unwrap();
+    let out = Command::new(ours())
+        .arg(&expr)
+        .args(["--design", design.to_str().unwrap()])
+        .args(["--block", block.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!out.status.success(), "must fail on a non-finite cell");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("non-finite"),
+        "error should name the non-finite cell, got: {err}"
     );
 }
 
